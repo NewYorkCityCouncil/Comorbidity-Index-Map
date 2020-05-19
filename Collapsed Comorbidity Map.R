@@ -143,8 +143,9 @@ labels_norm <- paste("<h3>",paste0("Census Tract ",map_sf$tract),"</h3>",
 bins_norm <- round(c(0,quantile(map_sf$severity_index_norm, 0.33, na.rm = T),quantile(map_sf$severity_index_norm, 0.66, na.rm = T),quantile(map_sf$severity_index_norm, 0.99, na.rm = T), max(map_sf$severity_index_norm, na.rm = T) + 1))
 pal_norm <- colorBin("YlOrRd", domain = map_sf$severity_index_norm, bins = bins_norm)
 
-leaflet(map_sf) %>%
-  setView(-73.935242,40.730610,10) %>%
+leaflet(map_sf, options = leafletOptions(zoomSnap = 0.5, 
+                                         zoomDelta = 0.5)) %>%
+  setView(-73.935242,40.730610,10.5) %>%
   addProviderTiles("CartoDB.Positron") %>%
   addPolygons(weight = 1,
               color = "grey",

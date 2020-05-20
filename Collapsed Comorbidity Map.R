@@ -86,6 +86,7 @@ library(sf)
 library(htmltools)
 library(dplyr)
 
+#NYC shapefile from: https://data.cityofnewyork.us/City-Government/2010-Census-Tracts/fxpq-c8ku
 nyctractjson <- data.table(read_sf("./2010 Census Tracts/geo_export_3837d0c5-90cf-43f6-97ba-24cc79104946.shp") %>%
                            st_transform("+proj=longlat +datum=WGS84"))
 nyctractjson[,name := paste0('Census Tract ',ctlabel,', ',boro_name,' Boro')]

@@ -44,8 +44,8 @@ Convertboro <- data.table(Census_boro_code = c('05','47','81','85','61'),
                           boro_code=c(2,3,4,5,1), 
                           boro_name = c("Bronx","Brooklyn","Queens","Staten Island","Manhattan"))
 
-Comorbidities_df[,c("boro_code","boro_name") := .(lapply(boro_code, function(x) Convertboro[Census_boro_code == x,boro_code]),
-                                         lapply(boro_code, function(x) Convertboro[Census_boro_code == x,boro_name]))][
+Comorbidities_df[,c("boro_code","boro_name") := .(sapply(boro_code, function(x) Convertboro[Census_boro_code == x,boro_code]),
+                                         sapply(boro_code, function(x) Convertboro[Census_boro_code == x,boro_name]))][
                                            ,name := paste0('Census Tract ',tract,', ',boro_name,' Boro')]
 
 
@@ -87,7 +87,7 @@ library(htmltools)
 library(dplyr)
 
 #NYC shapefile from: https://data.cityofnewyork.us/City-Government/2010-Census-Tracts/fxpq-c8ku
-nyctractjson <- data.table(read_sf("./NYC Shapefile/geo_export_3837d0c5-90cf-43f6-97ba-24cc79104946.shp") %>%
+nyctractjson <- data.table(st_read("./2010 Census Tracts/") %>%
                            st_transform("+proj=longlat +datum=WGS84"))
 nyctractjson[,name := paste0('Census Tract ',ctlabel,', ',boro_name,' Boro')]
 
@@ -158,3 +158,41 @@ leaflet(map_sf, options = leafletOptions(zoomSnap = 0.5,
             labels = c("Low","Medium","High","Very High"),
             opacity = 0.6,
             position = "topright")
+
+
+  
+
+## See where the areas we identified lie on this
+BK_PoI <- c("11224","11212","11233","11235","11239")
+Bronx_PoI <- c("10451","10467","10472","10454","10475")
+Man_PoI <- c("10038","10035","10029","10039","10002")
+Queens_PoI <- c("11691","11101","11434","11692","11355")
+Staten_PoI <- c("10301","10304","10301","10314","10306","10304","10314")
+
+PoI <- c(BK_PoI,Bronx_PoI,Man_PoI,Queens_PoI,Staten_PoI)
+
+plot_ly(data=MZCTA_df[MODIFIED_ZCTA %in% PoI],
+        x=~COVID_DEATH_RATE,
+        y=~WEIGHTED_MZCTA_SI,
+        type = 'scatter',
+        mode = 'markers') %>%
+  add_trace(x=~COVID_DEATH_RATE, y = ~COVID_DEATH_RATE, mode = 'lines')
+
+
+plot_ly(data=MZCTA_df[MODIFIED_ZCTA %in% PoI],
+        x=~WEIGHTED_MZCTA_SI,
+        y=~COVID_DEATH_RATE,
+        type = 'scatter',
+        mode = 'markers') %>%
+  add_trace(x=~WEIGHTED_MZCTA_SI, y = ~fitted, mode = 'lines')
+
+# Some predictive analysis
+
+
+#TestSet <- merge(NYCCOPD[,c("COPD_values","COPD_low_CL","COPD_high_CL") := .(data_value,low_confidence_limit,high_confidence_limit)][,list(tractfips,COPD_values,COPD_low_CL,COPD_high_CL)],
+#                         NYCHyper[,c("Hyper_values","Hyper_low_CL","Hyper_high_CL") := .(data_value,low_confidence_limit,high_confidence_limit)][,list(tractfips,Hyper_values,Hyper_low_CL,Hyper_high_CL)],
+#                         by = "tractfips")[tractfips != 0]
+#
+#TestSet[,intersectProb := COPD_values/100 + Hyper_values/100 - COPD_values/100 * Hyper_values/100]
+
+

@@ -1,0 +1,217 @@
+---
+title: "Analysis on Differences"
+author: "James Wu"
+date: "7/7/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+load("./Comorbidity_df.RData")
+library(data.table)
+library(stringr)
+library(leaflet)
+library(sf)
+library(htmltools)
+library(dplyr)
+```
+
+## Introduction
+After creating the Severity Index (SI), I wanted to see how well they matched up with the actual fatality data and their locations. New York City Department of Health and Mental Hygiene publishes their fatality numbers within modified zip codes (for further information on how they aggregated deaths, please refer to their Github page: https://github.com/nychealth/coronavirus-data).
+
+## Data Preparation
+Since the fatality data is given at the modified zip code level, the SIs need to be crosswalked up to that level for a proper comparison. We assume that the SI we created are uniform within each census tract, so that we can extrapolate the SI of a modified zip as a weighted average of SIs of the census tracts that make up the modified zip. This is done by multiplying each census tract’s SI by their population, summed at the modified zip level, and then divided by the modified zip’s total population.
+
+```{r}
+# Crosswalk between census tract and zcta
+URL_ZCTAtoCT <- "https://www2.census.gov/geo/docs/maps-data/data/rel/zcta_tract_rel_10.txt?#"
+ZCTAtoCT_df <- fread(URL_ZCTAtoCT)
+ZNYC <- ZCTAtoCT_df[STATE=="36" & (COUNTY=="05" | COUNTY=="5" | COUNTY=="47" | COUNTY=="81" | COUNTY=="85" | COUNTY=="61")]
+
+# Get fatality data from DOHMH
+URL_Fatality<- "https://raw.githubusercontent.com/nychealth/coronavirus-data/master/data-by-modzcta.csv"
+Fatality_df <- fread(URL_Fatality)
+
+# Get MZCTA conversion data from DOHMH
+URL_ZCTAtoMZCTA <- "https://raw.githubusercontent.com/nychealth/coronavirus-data/master/Geography-resources/ZCTA-to-MODZCTA.csv"
+ZCTAtoMZCTA_df <- fread(URL_ZCTAtoMZCTA)
+
+# Merge Fatality Data and MODZCTA with ZNYC
+ZNYC[,"MODIFIED_ZCTA" := .(sapply(ZCTA5, function(x) ZCTAtoMZCTA_df[ZCTA == x,MODZCTA]))]
+ZNYC_Fatality <- merge(ZNYC, Fatality_df,all.x = TRUE)
+
+# Convert boroughs to the ones we have
+ZNYC_Fatality[,boro_code := stringr::str_sub(GEOID,-8,-7)] #Extract the boro code from GEOID
+ZNYC_Fatality[,TRACT := as.character(TRACT/100)]
+ZNYC_Fatality[TRACT == "170.1",TRACT := "170.10"] #Census Tract 170.1 is coded as '170.10' in our shapefile
+
+Convertboro <- data.table(Census_boro_code = c('05','47','81','85','61'), 
+                          boro_code=c(2,3,4,5,1), 
+                          boro_name = c("Bronx","Brooklyn","Queens","Staten Island","Manhattan"))
+
+ZNYC_Fatality[,c("boro_code","boro_name") := .(sapply(boro_code, function(x) Convertboro[Census_boro_code == x,boro_code]),
+                                               sapply(boro_code, function(x) Convertboro[Census_boro_code == x,boro_name]))][
+                                                 ,name := paste0('Census Tract ',TRACT,', ',boro_name,' Boro')]
+
+# Create the percentage variables
+## County and Tract Population
+ZNYC_Fatality[, `:=` (COUNTYTRACTPOP = sum(POPPT)), by = c("COUNTY","TRACT")]
+### Percentage of Population in Census Tract accounted for in the County
+ZNYC_Fatality[, `:=` (PERCENT_COUNTYTRACT = POPPT/COUNTYTRACTPOP)]
+
+## Zip and County Population
+### ZCTA5 Population
+ZNYC_Fatality[, `:=` (ZCTAPOP = sum(POPPT)), by = "ZCTA5"]
+
+## Modified Zip and Zip Population
+### Modified Zip Population
+ZNYC_Fatality[, `:=` (MODIFIEDZCTAPOP = sum(POPPT)), by = "MODIFIED_ZCTA"]
+### Population of Zip / Modified Zip
+ZNYC_Fatality[, PERCENT_MODZZCTA := (ZCTAPOP)/MODIFIEDZCTAPOP]
+
+# Merge severity index variable with Zip and Fatality data
+ZNYC_Fatality <- merge(x = ZNYC_Fatality, y = Comorbidities_df[ , c("name", "severity_index","severity_index_norm")], by = "name", all.x=TRUE)
+
+# Create weighted SI by MZCTA
+## Multiply SI with POPPT and COUNTYTRACTPOP
+ZNYC_Fatality[, RAW_MZCTA_SI := severity_index_norm * POPPT]
+## Divide by MODIFIEDZCTAPOP and sum them up for a weighted average SI by MODIFIED_ZCTA
+ZNYC_Fatality[,`:=` (WEIGHTED_MZCTA_SI = sum(RAW_MZCTA_SI,na.rm=T)/MODIFIEDZCTAPOP),by = "MODIFIED_ZCTA"]
+```
+
+## Correlation
+First, let's look at how correlated the new SIs at the modified zip code level and the fatality rates are. Plot the newly formed SIs against the death rates provided by NYCDOHMH:
+```{r}
+# Plot it!
+library(plotly)
+MZCTA_df <- unique(ZNYC_Fatality, by = c("COVID_DEATH_RATE","WEIGHTED_MZCTA_SI"))
+
+
+## SI vs. COVID Death Rate
+plotly_labels <- paste("<b>",paste0("Modified ZIP: ",MZCTA_df$MODIFIED_ZCTA),"</b><br>",
+                       "<b>Neighborhood:",MZCTA_df$NEIGHBORHOOD_NAME,"</b><br>",
+                       "<b>SI:</b>",round(MZCTA_df$WEIGHTED_MZCTA_SI,2),"<br>",
+                       "<b>DEATH RATE:</b>",MZCTA_df$COVID_DEATH_RATE)
+
+
+fig <- plot_ly(data = MZCTA_df,
+               x = ~WEIGHTED_MZCTA_SI,
+               y = ~COVID_DEATH_RATE,
+               type = 'scatter',
+               mode = 'markers',
+               name = "",
+               hoverinfo = 'text',
+               text = lapply(plotly_labels,HTML)) %>%
+  layout(
+    title = "Severity Index vs. NYC Death Rates",
+    xaxis = list(title = "Severity Index"),
+    yaxis = list(title = "COVID Death Rate (per 100,000)"))
+
+lm_fit <- lm(COVID_DEATH_RATE~WEIGHTED_MZCTA_SI, data = MZCTA_df)
+
+fig %>%
+  add_trace(x = ~WEIGHTED_MZCTA_SI, y = fitted(lm_fit), mode = "lines") %>%
+  layout(showlegend = F)
+```
+
+Here, we see a general upwards trend, a positive correlation between our created severity indices and the area’s death rates (0.67), which could be interpreted as the area’s comorbidity makeup being correlated with their death rates. The SIs were also able to accurately identify the area with the highest death rates (East New York) and the area with the lowest death rates (Financial District).
+
+## Map of Differences
+Since the SIs are a constructed index and do not have a scale, it may be more interesting to see how well the relative quantiles for the SI match up with the relative quantiles for the COVID Death Rates. The following map shows this:
+```{r, message=F}
+# Map of areas with highest fatalities
+URL_MZCTA <- "./MZCTA_2010"
+MZCTA_shp <- st_read(URL_MZCTA) %>%
+  st_transform("+proj=longlat +datum=WGS84")
+
+MZCTA_sf <- st_sf(merge(MZCTA_df[,MODIFIED_ZCTA := as.factor(MODIFIED_ZCTA)],
+                        MZCTA_shp,
+                        by.x = "MODIFIED_ZCTA",
+                        by.y = "MODZCTA"))
+
+# Consider breaking the SIs and Death Rates into 9 bins, how well do the SIs match up quantile-wise?
+bins_MODSI <- round(c(0,quantile(MZCTA_sf$WEIGHTED_MZCTA_SI, 0.15, quantile(MZCTA_sf$WEIGHTED_MZCTA_SI, 0.30, na.rm = T),na.rm = T),quantile(MZCTA_sf$WEIGHTED_MZCTA_SI, 0.40, na.rm = T),quantile(MZCTA_sf$WEIGHTED_MZCTA_SI, 0.50, na.rm = T),quantile(MZCTA_sf$WEIGHTED_MZCTA_SI, 0.60, na.rm = T),quantile(MZCTA_sf$WEIGHTED_MZCTA_SI, 0.70, na.rm = T),quantile(MZCTA_sf$WEIGHTED_MZCTA_SI, 0.80, na.rm = T),quantile(MZCTA_sf$WEIGHTED_MZCTA_SI, 0.90, na.rm = T),quantile(MZCTA_sf$WEIGHTED_MZCTA_SI, 0.99, na.rm = T), max(MZCTA_sf$WEIGHTED_MZCTA_SI, na.rm = T) + 1),4)
+bins_COVIDDEATH <- round(c(0,quantile(MZCTA_sf$COVID_DEATH_RATE, 0.15, quantile(MZCTA_sf$COVID_DEATH_RATE, 0.30, na.rm = T),na.rm = T),quantile(MZCTA_sf$COVID_DEATH_RATE, 0.40, na.rm = T),quantile(MZCTA_sf$COVID_DEATH_RATE, 0.50, na.rm = T),quantile(MZCTA_sf$COVID_DEATH_RATE, 0.60, na.rm = T),quantile(MZCTA_sf$COVID_DEATH_RATE, 0.70, na.rm = T),quantile(MZCTA_sf$COVID_DEATH_RATE, 0.80, na.rm = T),quantile(MZCTA_sf$COVID_DEATH_RATE, 0.90, na.rm = T),quantile(MZCTA_sf$COVID_DEATH_RATE, 0.99, na.rm = T), max(MZCTA_sf$COVID_DEATH_RATE, na.rm = T) + 1),4)
+
+cuts_MODSI <- cut(MZCTA_sf$WEIGHTED_MZCTA_SI,
+                  bins_MODSI, 
+                  labels = c(1,2,3,4,5,6,7,8,9))
+cuts_COVIDDEATH <- cut(MZCTA_sf$COVID_DEATH_RATE,
+                       bins_COVIDDEATH, 
+                       include.lowest=TRUE,
+                       labels = c(1,2,3,4,5,6,7,8,9))
+
+cuts_diff <- abs(as.numeric(cuts_MODSI) - as.numeric(cuts_COVIDDEATH)) + 1
+
+# Create Labels and color bins for map
+labels_MOD<- paste("<h4>",paste0("Neighborhood Name: ",MZCTA_sf$NEIGHBORHOOD_NAME),"</h4>",
+                   "<h4>","Modified Zip: ",MZCTA_sf$MODIFIED_ZCTA,"</h4>",
+                   "<p>","Modified SI: ",format(MZCTA_sf$WEIGHTED_MZCTA_SI,nsmall = 0, big.mark = ","),"</p>",
+                   "<p>","COVID Death Rate (per 100,000): ",format(MZCTA_sf$COVID_DEATH_RATE,nsmall = 0,big.mark = ","),"</p>")
+
+labels_Diff<- paste("<h4>",paste0("Neighborhood Name: ",MZCTA_sf$NEIGHBORHOOD_NAME),"</h4>",
+                    "<h4>","Modified Zip: ",MZCTA_sf$MODIFIED_ZCTA,"</h4>",
+                    "<p>","Modified SI: ",format(MZCTA_sf$WEIGHTED_MZCTA_SI,nsmall = 0, big.mark = ","),"</p>",
+                    "<p>","COVID Death Rate (per 100,000): ",format(MZCTA_sf$COVID_DEATH_RATE,nsmall = 0,big.mark = ","),"</p>",
+                    "<p>","Quantile Difference: ",format(cuts_diff,nsmall = 0, big.mark = ","),"</p>")
+
+pal_MODSI <- colorBin("YlOrRd", domain = MZCTA_sf$WEIGHTED_MZCTA_SI, bins = bins_MODSI)
+pal_COVIDDEATH <- colorBin("YlOrRd", domain = MZCTA_sf$COVID_DEATH_RATE, bins = bins_COVIDDEATH)
+pal_diff <- colorNumeric("RdPu", domain = cuts_diff)
+
+# Map it!
+leaflet(MZCTA_shp, options = leafletOptions(zoomSnap = 0.5, 
+                                            zoomDelta = 0.5)) %>%
+  setView(-73.935242,40.730610,10.5) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  #Polygon Layers
+  addPolygons(data = MZCTA_sf,
+              weight = 1,
+              color = "grey",
+              group = "Differences",
+              fillOpacity = 1,
+              fillColor = pal_diff(cuts_diff),
+              label = lapply(labels_Diff,HTML)
+  ) %>%
+  addPolygons(data = MZCTA_sf,
+              weight = 1,
+              color = "grey",
+              group = "Modified SI",
+              fillColor = pal_MODSI(MZCTA_sf$WEIGHTED_MZCTA_SI),
+              label = lapply(labels_MOD,HTML)) %>%
+  addPolygons(data = MZCTA_sf,
+              weight = 1,
+              color = "grey",
+              group = "COVID19 Death Rate",
+              fillColor = pal_COVIDDEATH(MZCTA_sf$COVID_DEATH_RATE),
+              label = lapply(labels_MOD,HTML)) %>%
+  #Legend Layers
+  addLegend("bottomleft", pal = pal_diff, values = ~cuts_diff,
+            group = "Differences",
+            title = "Accuracy",
+            opacity = 0.7,
+            labFormat =  function(type, cuts, p) {
+              n = length(cuts) 	
+              cuts[n] = "way off" 	
+              for (i in 2:(n-1)){cuts[i] = ""} 	
+              cuts[1] = "on point" 	
+              paste0(cuts[-n], cuts[-1])}) %>%
+  addLegend("bottomright", pal = pal_MODSI, values = ~MZCTA_sf$WEIGHTED_MZCTA_SI,
+            group = "Modified SI",
+            title = "Severity",
+            opacity = 0.7,
+            labFormat =  function(type, cuts, p) {
+              n = length(cuts) 	
+              cuts[n] = "High" 	
+              for (i in 2:(n-1)){cuts[i] = ""} 	
+              cuts[1] = "Low" 	
+              paste0(cuts[-n], cuts[-1])}) %>%
+  #Layers Control
+  addLayersControl(
+    baseGroups =c("COVID19 Death Rate", "Modified SI","Differences"),
+    options = layersControlOptions(collapsed=FALSE),
+    position = "topright"
+  )
+```
+
+## Conclusions
+The SIs were able to accurately identify the severity level of many locations. However, there are certain areas that are significantly different than expected (i.e. large quantile difference between SIs and COVID Death Rates); areas like Corona, Elmhurst, Jackson Heights, Kew Gardens, and Battery Park City have much higher death rates than what the SIs would suggest, and areas like Roosevelt Island, Wakefield/Woodlawn, Hunts Point, and Breezy Point have much lower death rates than what the SIs would suggest. This may imply that there are other driving forces and confounding variables that must be accounted for, and just the comorbidity makeup is not enough for these areas. Further research in these areas and a more rigorous approach in our assumptions may be warranted for future studies. 
